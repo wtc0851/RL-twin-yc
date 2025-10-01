@@ -1,0 +1,9 @@
+gymnasium
+numpy
+matplotlib
+stable-baselines3[extra]
+torch
+tensorboard
+tqdm
+rich
+sb3-contrib
