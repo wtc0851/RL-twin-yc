@@ -1,14 +1,20 @@
 import os
 import sys
 import gymnasium as gym
+import numpy as np
 
 # 将项目根目录添加到 Python 路径中
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from src.environment.env import YardEnv
-from stable_baselines3 import PPO
+from sb3_contrib import MaskablePPO
+from sb3_contrib.common.wrappers import ActionMasker
 from stable_baselines3.common.env_checker import check_env
 from stable_baselines3.common.vec_env import DummyVecEnv
+
+def mask_fn(env: gym.Env) -> np.ndarray:
+    """一个辅助函数，用于从环境中提取动作掩码。"""
+    return env.action_mask()
 
 def main():
     """
@@ -26,14 +32,14 @@ def main():
 
     # 为了训练，我们通常使用“向量化”的环境，它可以并行运行多个环境实例以加速数据收集。
     # DummyVecEnv 是最简单的实现，它在一个进程中按顺序运行多个环境。
-    env = DummyVecEnv([lambda: YardEnv(render_mode=None)])
+    env = DummyVecEnv([lambda: ActionMasker(YardEnv(render_mode=None), mask_fn)])
 
 
     # --- 2. 模型设置 ---
     # 'MlpPolicy' 策略适用于扁平化的观测空间。对于我们的字典(Dict)观测空间，
     # Stable Baselines3 会自动使用一个 CombinedExtractor 来处理不同部分的输入。
     # 我们也可以为 PPO 算法定义一些超参数。
-    model = PPO(
+    model = MaskablePPO(
         "MultiInputPolicy",
         env,
         verbose=1,  # 设置为 1 以便在控制台看到训练进度
