@@ -46,18 +46,18 @@ class YardEnv(gym.Env):
         self.num_bays = 50                       # 贝位数量
         self.num_cranes = 2                      # 场桥数量
         self.crane_speed = 2.5                   # 场桥移动速度 (单位: 贝位/秒)
-        self.mean_task_interval = 30.0           # 任务生成间隔 (单位: 秒)
-        self.mean_task_execution_time = 60.0     # 任务执行时间 (单位: 秒)
+        self.mean_task_interval = 60.0           # 任务生成间隔 (单位: 秒)
+        self.mean_task_execution_time = 30.0     # 任务执行时间 (单位: 秒)
         self.max_simulation_time = 3600.0        # 最大模拟时间 (单位: 秒)  1小时
         self.max_tasks_in_obs = 10               # 代理能观察到的最大任务数量
         self.crane_initial_positions = [1, self.num_bays]       # 场桥初始位置
 
         # --- 奖励设计 ---
-        self.wait_penalty = -10.0                # 代理选择“等待”动作的惩罚
-        self.collision_penalty = -500.0          # 代理做出无效动作（如导致碰撞）的惩罚
-        self.task_acceptance_reward = 50.0       # 奖励1: 接受任务
-        self.arrival_reward = 200.0              # 奖励2: 到达位置
-        self.task_completion_reward = 750.0      # 奖励3: 完成任务 (总奖励 50+200+750=1000)
+        self.wait_penalty = -0.1                # 代理选择“等待”动作的惩罚
+        self.collision_penalty = -20.0          # 代理做出无效动作（如导致碰撞）的惩罚
+        self.task_acceptance_reward = 0.5       # 奖励1: 接受任务
+        self.arrival_reward = 2.0              # 奖励2: 到达位置
+        self.task_completion_reward = 7.5      # 奖励3: 完成任务 (总奖励 0.5+2.0+7.5=10)
 
         # --- 动作空间和状态空间 ---
         self.action_space = spaces.Discrete(self.max_tasks_in_obs + 1)
@@ -113,9 +113,9 @@ class YardEnv(gym.Env):
 
         # 4. 将新任务添加到待处理队列
         self.task_queue.append(new_task)
-        print(
-            f"[{self.current_time:.2f}s] 新任务 {task_id} 到达位置 {location}."
-        )
+        # print(
+        #     f"[{self.current_time:.2f}s] 新任务 {task_id} 到达位置 {location}."
+        # )
 
     def _get_observation(self, crane_to_command_id: int) -> Dict:
         """将当前环境状态转换为 agent 需要的观测值 (numpy array)。"""
@@ -290,7 +290,7 @@ class YardEnv(gym.Env):
         action_mask = self._get_action_mask(crane_id)
         if action_mask[action] == 0:
             # 惩罚无效动作并终止
-            return self.collision_penalty
+            return self.collision_penalty  # 碰撞或无效动作惩罚
 
         # 动作是“等待”
         wait_action_index = self.max_tasks_in_obs
@@ -299,7 +299,7 @@ class YardEnv(gym.Env):
             self.history[crane.id].append((self.current_time, crane.location))
             crane.status = CraneStatus.IDLE
             reward = self.wait_penalty
-            print(f"[{self.current_time:.2f}s] 场桥 {crane_id} 选择等待")
+            # print(f"[{self.current_time:.2f}s] 场桥 {crane_id} 选择等待")
         # 动作是“分配任务”
         else:
             task_to_assign = self.task_queue.pop(action)
@@ -321,9 +321,9 @@ class YardEnv(gym.Env):
                 self.event_queue,
                 Event(time=arrival_time, type=EventType.CRANE_ARRIVAL, data={"crane_id": crane_id}),
             )
-            print(
-                f"[{self.current_time:.2f}s] 场桥 {crane_id} 分配了任务 {task_to_assign.id} 在位置 {task_to_assign.location}. ETA: {arrival_time:.2f}s. 奖励: +{self.task_acceptance_reward:.2f}"
-            )
+            # print(
+            #     f"[{self.current_time:.2f}s] 场桥 {crane_id} 分配了任务 {task_to_assign.id} 在位置 {task_to_assign.location}. ETA: {arrival_time:.2f}s. 奖励: +{self.task_acceptance_reward:.2f}"
+            # )
 
         self.crane_to_command = None
         return reward
@@ -340,7 +340,7 @@ class YardEnv(gym.Env):
 
             # 2. 检查是否超时
             if self.current_time >= self.max_simulation_time:
-                print(f"[{self.current_time:.2f}s] 仿真时间已到.")
+                # print(f"[{self.current_time:.2f}s] 仿真时间已到.")
                 # 在超时的情况下，我们需要为某个agent提供一个最终的观测值
                 # 这里我们简单地选择0号crane，并提供一个全零的观测
                 final_obs = self._get_observation(0)
@@ -368,9 +368,9 @@ class YardEnv(gym.Env):
                     self.event_queue,
                     Event(time=completion_time, type=EventType.TASK_COMPLETION, data={"crane_id": crane_id}),
                 )
-                print(
-                    f"[{self.current_time:.2f}s] 场桥 {crane_id} 到达位置 {crane.location} 并开始工作. 奖励: +{self.arrival_reward:.2f}"
-                )
+                # print(
+                #     f"[{self.current_time:.2f}s] 场桥 {crane_id} 到达位置 {crane.location} 并开始工作. 奖励: +{self.arrival_reward:.2f}"
+                # )
 
             # --------------------------
             # --- 任务完成事件 ---
@@ -381,12 +381,15 @@ class YardEnv(gym.Env):
 
                 # --- 分阶段奖励 3: 完成任务 (减去等待时间的惩罚) ---
                 task_wait_time = self.current_time - completed_task.creation_time
-                reward = self.task_completion_reward - task_wait_time
+                # 对等待时间本身进行缩放，并限制惩罚下限
+                scaled_time_penalty = -task_wait_time / 1.0
+                capped_penalty = max(-10.0, scaled_time_penalty)
+                reward = self.task_completion_reward + capped_penalty
                 accumulated_reward += reward
 
-                print(
-                    f"[{self.current_time:.2f}s] 场桥 {crane_id} 完成任务 {completed_task.id}. 等待时间: {task_wait_time:.2f}s. 奖励: {reward:.2f}"
-                )
+                # print(
+                #     f"[{self.current_time:.2f}s] 场桥 {crane_id} 完成任务 {completed_task.id}. 等待时间: {task_wait_time:.2f}s. 奖励: {reward:.2f}"
+                # )
 
                 # 更新状态
                 self.completed_tasks.append(completed_task)
@@ -436,7 +439,7 @@ class YardEnv(gym.Env):
                     return crane_id_to_command, observation, accumulated_reward, False, False, info
 
         # 如果事件队列为空，说明仿真结束
-        print(f"[{self.current_time:.2f}s] Event queue is empty. Simulation finished.")
+        print(f"[{self.current_time:.2f}s] 事件队列已空. 仿真结束.")
         final_obs = self._get_observation(0)
         return 0, final_obs, accumulated_reward, True, False, {"termination_reason": "event_queue_empty"}
 

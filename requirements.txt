@@ -1,7 +1,7 @@
 gymnasium
 numpy
 matplotlib
-stable-baselines3[extra]
+# stable-baselines3[extra]
 torch
 tensorboard
 tqdm

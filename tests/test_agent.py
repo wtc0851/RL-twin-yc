@@ -27,7 +27,7 @@ def main():
     env = ActionMasker(env, mask_fn)
 
     # 加载之前训练并保存的模型
-    model_path = os.path.join("../models", "ppo_yard_model.zip")
+    model_path = os.path.join("models", "ppo_yard_model.zip")
     if not os.path.exists(model_path):
         print(f"错误：找不到模型文件 at {model_path}")
         print("请先运行 train_ppo.py 脚本来训练和保存模型。")

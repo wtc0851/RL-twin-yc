@@ -72,7 +72,7 @@ def main():
             break
 
     print("\n----- Simulation Finished -----")
-    env.render()
+    env.plot_crane_trajectories(save_path="trained_agent_trajectory.png")
     env.close()
 
 

@@ -1,0 +1,18 @@
+{
+  "episode_rewards": [],
+  "episode_lengths": [],
+  "losses": [
+    23505590.0,
+    25731952.0,
+    20964476.0,
+    14694040.0
+  ],
+  "success_rates": [],
+  "timesteps": [
+    4096,
+    6144,
+    8192,
+    10240
+  ],
+  "episode_count": 0
+}
