@@ -17,14 +17,10 @@ def mask_fn(env: gym.Env) -> np.ndarray:
     return env.action_mask()
 
 def main():
-    """
-    使用 PPO 算法训练一个 Agent 来解决 YardEnv 环境中的调度问题。
-    """
+    # 使用 PPO 算法训练一个 Agent 来解决 YardEnv 环境中的调度问题。
     print("--- 开始 PPO 训练 ---")
 
     # --- 1. 环境设置 ---
-    # 在开始训练前，检查自定义环境是否符合 aPI 标准，这是一个好习惯。
-    # 如果环境不兼容，检查程序会抛出错误。
     print("正在检查环境兼容性...")
     env_instance = YardEnv()
     check_env(env_instance, warn=True)
@@ -32,31 +28,37 @@ def main():
 
     # 为了训练，我们通常使用“向量化”的环境，它可以并行运行多个环境实例以加速数据收集。
     # DummyVecEnv 是最简单的实现，它在一个进程中按顺序运行多个环境。
-    env = DummyVecEnv([lambda: ActionMasker(YardEnv(render_mode=None), mask_fn)])
-
+    # 并行环境数（增加采样吞吐和稳定性）
+    n_envs = 8
+    env = DummyVecEnv([lambda: ActionMasker(YardEnv(render_mode=None), mask_fn) for _ in range(n_envs)])
 
     # --- 2. 模型设置 ---
-    # 'MlpPolicy' 策略适用于扁平化的观测空间。对于我们的字典(Dict)观测空间，
-    # Stable Baselines3 会自动使用一个 CombinedExtractor 来处理不同部分的输入。
-    # 我们也可以为 PPO 算法定义一些超参数。
     model = MaskablePPO(
         "MultiInputPolicy",
         env,
-        verbose=1,  # 设置为 1 以便在控制台看到训练进度
-        tensorboard_log="./ppo_yard_tensorboard/", # 指定 TensorBoard 日志的保存路径
-        policy_kwargs=dict(net_arch=dict(pi=[64, 64], vf=[64, 64])) # 定义一个较小的神经网络结构
+        verbose=1,
+        tensorboard_log="./ppo_yard_tensorboard/",
+        learning_rate=3e-4,
+        n_steps=1024,        # 每个环境每次收集的步数
+        batch_size=512,      # 需能整除 n_steps * n_envs (=8192)
+        gamma=0.99,
+        gae_lambda=0.95,
+        clip_range=0.2,
+        ent_coef=0.01,
+        n_epochs=10,
+        target_kl=0.05,
+        seed=42,
+        policy_kwargs=dict(net_arch=dict(pi=[128, 128], vf=[128, 128]))
     )
 
     # --- 3. 模型训练 ---
-    # total_timesteps 指的是 Agent 与环境交互的总步数 (env.step())。
     # 我们先从一个较小的数值开始，以验证整个流程是否能跑通。
-    total_timesteps = 25000
+    total_timesteps = 1_000_000
     print(f"准备训练模型，总步数: {total_timesteps}...")
-    model.learn(total_timesteps=100000, progress_bar=True)
+    model.learn(total_timesteps=total_timesteps, progress_bar=True)
     print("模型训练完成。")
 
     # --- 4. 保存模型 ---
-    # 训练好的模型可以被保存下来，以便未来加载和使用。
     save_path = os.path.join("models", "ppo_yard_model.zip")
     model.save(save_path)
     print(f"模型已保存至: {save_path}")
@@ -64,13 +66,12 @@ def main():
     # --- 5. (可选) 评估训练好的模型 ---
     print("--- 开始评估训练好的模型 ---")
     obs = env.reset()
-    for i in range(1000): # 运行 1000 步进行测试
+    for i in range(1000):  # 运行 1000 步进行测试
         action, _states = model.predict(obs, deterministic=True)
         obs, rewards, dones, infos = env.step(action)
         if dones.any():
             print("一个评估回合结束。")
             obs = env.reset()
-
 
     env.close()
     print("--- 训练与评估全部完成 ---")

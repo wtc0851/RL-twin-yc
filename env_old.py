@@ -51,8 +51,6 @@ class YardEnv(gym.Env):
         self.max_simulation_time = 3600.0        # 最大模拟时间 (单位: 秒)  1小时
         self.max_tasks_in_obs = 10               # 代理能观察到的最大任务数量
         self.crane_initial_positions = [1, self.num_bays]       # 场桥初始位置
-        # 新增：为测试/评估设置步数上限，防止策略长时间运行
-        self.max_episode_steps = 5000
 
         # --- 静态任务数据支持 ---
         self.static_tasks = static_tasks                        # 静态任务列表
@@ -86,10 +84,8 @@ class YardEnv(gym.Env):
         self.completed_tasks: List[Task] = []                   # 已完成任务列表
         self.event_queue: List[Event] = []                      # 事件队列
         self.history: Dict[int, List[Tuple[float, int]]] = {}   # 场桥轨迹记录 (id -> [(time, pos)])
-        self.task_generation_stopped = False
+        self.task_generation_stopped = False                    # 任务生成是否已停止
         self.static_task_index = 0                              # 重置静态任务索引
-        # 新增：步数计数器
-        self.episode_steps = 0
         
         # --- 性能指标收集 ---
         self.total_task_wait_time = 0.0                         # 任务总等待时间
@@ -102,10 +98,6 @@ class YardEnv(gym.Env):
         # 渲染模式
         assert render_mode is None or render_mode in self.metadata["render_modes"]
         self.render_mode = render_mode
-        # 为等待动作推进的微小时间步长（秒）
-        self.wait_time_step = 1.0
-        # 固定等待后重新决策的时长（秒）
-        self.decision_wait_seconds = 5.0
 
     def _generate_new_task(self):
         """生成一个新任务并将其放入任务队列，同时安排下一次任务生成事件。"""
@@ -129,6 +121,7 @@ class YardEnv(gym.Env):
         elif next_task_arrival_time >= self.max_simulation_time:
             # 如果超过最大模拟时间，停止任务生成
             self.task_generation_stopped = True
+            print(f"[{self.current_time:.2f}s] 达到最大模拟时间，停止生成新任务")
 
         # 3. 创建新任务
         task_id = len(self.completed_tasks) + len(self.task_queue)
@@ -146,6 +139,9 @@ class YardEnv(gym.Env):
 
         # 4. 将新任务添加到待处理队列
         self.task_queue.append(new_task)
+        print(
+            f"[{self.current_time:.2f}s] 新任务 {task_id} 到达位置 {location}."
+        )
 
     def _generate_static_task(self):
         """从静态任务列表中生成任务"""
@@ -153,6 +149,7 @@ class YardEnv(gym.Env):
         if self.static_task_index >= len(self.static_tasks):
             # 所有静态任务都已生成，停止任务生成
             self.task_generation_stopped = True
+            print(f"[{self.current_time:.2f}s] 所有静态任务已生成，停止生成新任务")
             return
 
         # 获取下一个静态任务数据
@@ -183,6 +180,7 @@ class YardEnv(gym.Env):
         self.task_queue.append(new_task)
         self.static_task_index += 1
 
+        print(f"[{self.current_time:.2f}s] 生成静态任务 {task_id} 在位置 {new_task.location}，执行时间: {new_task.execution_time:.2f}s")
 
         # 如果还有更多静态任务，安排下一个任务生成事件
         if self.static_task_index < len(self.static_tasks):
@@ -196,49 +194,7 @@ class YardEnv(gym.Env):
                 )
             else:
                 self.task_generation_stopped = True
-
-    def _is_task_feasible_for_crane(self, crane_id: int, task: Task) -> bool:
-        """基于当前碰撞规则判断某个任务对指定场桥是否可执行。"""
-        commanding_crane = self.cranes[crane_id]
-        other_crane = self.cranes[1 - crane_id]
-        # 动态障碍区间
-        if other_crane.status == CraneStatus.MOVING:
-            other_crane_barrier_min = min(other_crane.location, other_crane.current_task.location)
-            other_crane_barrier_max = max(other_crane.location, other_crane.current_task.location)
-        else:
-            other_crane_barrier_min = other_crane.location
-            other_crane_barrier_max = other_crane.location
-        task_loc = task.location
-        # 应用与 _get_action_mask 相同的边界规则（已放宽为严格不等式）
-        if crane_id == 0:
-            return not (max(commanding_crane.location, task_loc) > other_crane_barrier_min)
-        else:
-            return not (min(commanding_crane.location, task_loc) < other_crane_barrier_max)
-
-    def _get_visible_tasks(self) -> List[Task]:
-        """返回当前可见任务集合。
-        优先包含对当前待指令场桥可执行的任务，避免仅显示不可执行任务导致持续等待。
-        """
-        # 先按 available_time 排序所有任务
-        sorted_tasks = sorted(self.task_queue, key=lambda t: t.available_time)
-        if self.crane_to_command is None:
-            # 没有待指令场桥时，保持旧行为
-            return sorted_tasks[:self.max_tasks_in_obs]
-        # 优先挑选对当前场桥可执行的任务
-        feasible = []
-        infeasible = []
-        for t in sorted_tasks:
-            if self._is_task_feasible_for_crane(self.crane_to_command, t):
-                feasible.append(t)
-            else:
-                infeasible.append(t)
-        # 组装可见列表：先放可执行，再补不可执行，保证长度与稳定性
-        visible = []
-        visible.extend(feasible[:self.max_tasks_in_obs])
-        if len(visible) < self.max_tasks_in_obs:
-            need = self.max_tasks_in_obs - len(visible)
-            visible.extend(infeasible[:need])
-        return visible
+                print(f"[{self.current_time:.2f}s] 下一个静态任务超出最大模拟时间，停止生成新任务")
 
     def _get_observation(self, crane_to_command_id: int) -> Dict:
         """将当前环境状态转换为 agent 需要的观测值 (numpy array)。"""
@@ -251,10 +207,10 @@ class YardEnv(gym.Env):
         while len(crane_status_list) < self.num_cranes:
             crane_status_list.append([0, 0])
 
-        # 2. 任务列表（使用可见任务，available_time 顺序）
-        visible_tasks = self._get_visible_tasks()
+        # 2. 任务列表 (按创建时间排序)
+        self.task_queue.sort(key=lambda t: t.creation_time)
         task_list_obs = []
-        for task in visible_tasks:
+        for task in self.task_queue[: self.max_tasks_in_obs]:
             task_list_obs.append(
                 [task.location, task.available_time, task.execution_time]
             )
@@ -264,17 +220,11 @@ class YardEnv(gym.Env):
             task_list_obs.append([0, 0, 0])
 
         # 3. 动作掩码
-        # 当 crane_to_command 为空时，至少允许“等待”以推进时间
-        if crane_to_command_id is None or not (0 <= crane_to_command_id < self.num_cranes):
-            action_mask = np.zeros(self.action_space.n, dtype=np.int8)
-            action_mask[-1] = 1
-        else:
-            action_mask = self._get_action_mask(crane_to_command_id)
+        action_mask = self._get_action_mask(crane_to_command_id)
 
         # 4. 待指令的场桥ID (One-hot)
         crane_to_command_obs = [0] * self.num_cranes
-        if crane_to_command_id is not None and 0 <= crane_to_command_id < self.num_cranes:
-            crane_to_command_obs[crane_to_command_id] = 1
+        crane_to_command_obs[crane_to_command_id] = 1
 
         # 5. 组合成字典, 并转换为 numpy array 以符合 gym 的格式要求
         observation = {
@@ -287,9 +237,7 @@ class YardEnv(gym.Env):
 
     def _get_action_mask(self, crane_id: int) -> np.ndarray:
         mask = np.zeros(self.action_space.n, dtype=np.int8)
-        # 当没有待指令的场桥时，保持至少有“等待”动作可选
         if self.crane_to_command is None:
-            mask[-1] = 1
             return mask
 
         commanding_crane = self.cranes[crane_id]
@@ -306,34 +254,36 @@ class YardEnv(gym.Env):
             other_crane_barrier_min = other_crane.location
             other_crane_barrier_max = other_crane.location
 
-        visible_tasks = self._get_visible_tasks()
-        for i, task in enumerate(visible_tasks):
+        sorted_tasks = sorted(self.task_queue, key=lambda t: t.available_time)[:self.max_tasks_in_obs]
+        has_available_task = False  # 标记是否有可执行的任务
+        
+        for i, task in enumerate(sorted_tasks):
             is_collision = False
             task_loc = task.location
 
             # 规则：0号场桥必须始终在1号场桥的左边（或同一位置）
             if crane_id == 0:  # 我们正在指令左边的0号场桥
                 # 它的目标位置，以及它路径上的最右点，都不能越过1号场桥的活动范围的最左点
-                # 允许“等于”边界（两桥同位置时可以向外分离）
-                if max(commanding_crane.location, task_loc) > other_crane_barrier_min:
+                if max(commanding_crane.location, task_loc) >= other_crane_barrier_min:
                     is_collision = True
             else:  # 我们正在指令右边的1号场桥
                 # 它的目标位置，以及它路径上的最左点，都不能越过0号场桥的活动范围的最右点
-                # 允许“等于”边界（两桥同位置时可以向外分离）
-                if min(commanding_crane.location, task_loc) < other_crane_barrier_max:
+                if min(commanding_crane.location, task_loc) <= other_crane_barrier_max:
                     is_collision = True
             
-            if not is_collision:
-                mask[i] = 1
+            is_available = task.available_time <= self.current_time
 
-        # 始终允许等待动作，以保留探索能力
-        # 如果存在至少一个可执行任务，则不允许“等待”，强制执行任务以避免无限等待
-        # 如果存在至少一个可执行任务，则不允许“等待”，否则允许“等待”
-        if np.any(mask[:self.max_tasks_in_obs] == 1):
-            mask[-1] = 0
+            if not is_collision and is_available:
+                mask[i] = 1
+                has_available_task = True
+
+        # 防死循环逻辑：如果任务生成已停止且有可执行任务，禁止等待
+        if self.task_generation_stopped and has_available_task:
+            mask[-1] = 0  # 禁止等待动作
+            print(f"[{self.current_time:.2f}s] 任务生成已停止且有可执行任务，场桥 {crane_id} 禁止等待")
         else:
-            mask[-1] = 1
-        
+            mask[-1] = 1  # 允许等待动作
+            
         return mask
 
     def action_mask(self) -> np.ndarray:
@@ -342,10 +292,9 @@ class YardEnv(gym.Env):
         此方法由 ActionMasker 包装器需要。
         """
         if self.crane_to_command is None:
-            # 如果没有正在指令的场桥，返回仅允许“等待”的掩码，避免策略无动作可选
-            mask = np.zeros(self.action_space.n, dtype=np.int8)
-            mask[-1] = 1
-            return mask
+            # 如果没有正在指令的场桥，理论上不应该调用此方法。
+            # 为安全起见，返回一个禁止所有动作的掩码。
+            return np.zeros(self.action_space.n, dtype=np.int8)
         return self._get_action_mask(self.crane_to_command)
 
     def _get_info(self):
@@ -360,100 +309,6 @@ class YardEnv(gym.Env):
             "total_crane_move_time": self.total_crane_move_time,
             "total_crane_wait_time": self.total_crane_wait_time
         }
-
-    def _compute_next_decision_time(self, crane_id: int) -> float:
-        future_event_times = [e.time for e in self.event_queue if e.time > self.current_time]
-        next_event_time = min(future_event_times) if future_event_times else None
-        future_available_times = [t.available_time for t in self.task_queue if t.available_time > self.current_time]
-        next_task_time = min(future_available_times) if future_available_times else None
-        candidates = [t for t in [next_event_time, next_task_time] if t is not None]
-        if not candidates:
-            return self.current_time + self.wait_time_step
-        # 确保下一决策时间严格大于当前时间，避免“等待”后时间不推进导致无限等待
-        candidate = min(candidates)
-        if candidate <= self.current_time:
-            return self.current_time + self.wait_time_step
-        return candidate
-
-    def _apply_action(self, action: int) -> float:
-        """根据代理的动作，更新环境状态并返回即时奖励。"""
-        crane_id = self.crane_to_command
-        crane = self.cranes[crane_id]
-        reward = 0
-
-        # 检查动作是否有效
-        action_mask = self._get_action_mask(crane_id)
-        if action_mask[action] == 0:
-            # 惩罚无效动作并终止
-            # 碰撞惩罚也需要相应缩放以保持一致性
-            return self.collision_penalty / self.reward_scale_factor
-
-        # 动作是“等待”
-        wait_action_index = self.max_tasks_in_obs
-        if action == wait_action_index:
-            # 记录当前状态，以便在图表中显示
-            self.history[crane.id].append((self.current_time, crane.location))
-            crane.status = CraneStatus.IDLE
-
-            # 固定原地等待5秒，然后安排下一次决策事件
-            next_decision_time = self.current_time + self.decision_wait_seconds
-            delta_wait = max(0.0, next_decision_time - self.current_time)
-            self.total_crane_wait_time += delta_wait
-            # print(f"[WAIT] t={self.current_time:.2f}s crane={crane_id} wait={self.decision_wait_seconds:.1f}s -> next_decision={next_decision_time:.2f}s, pending_tasks={len(self.task_queue)}")
-
-            # 如果已经没有未来事件/任务，且没有待处理任务且两台场桥都空闲（且任务生成已停止），不再安排新的决策事件，交由事件循环终止
-            future_event_times_non_decision = [
-                e.time for e in self.event_queue
-                if e.time > self.current_time and e.type != EventType.DECISION_REQUEST
-            ]
-            future_available_times = [t.available_time for t in self.task_queue if t.available_time > self.current_time]
-            all_cranes_idle = all(c.status == CraneStatus.IDLE for c in self.cranes)
-            no_pending_tasks = len(self.task_queue) == 0
-            generation_fully_stopped = (
-                self.task_generation_stopped or (self.static_tasks is not None and self.static_task_index >= len(self.static_tasks))
-            )
-
-            if not future_event_times_non_decision and not future_available_times and all_cranes_idle and no_pending_tasks and generation_fully_stopped:
-                # 不推送新的 DECISION_REQUEST，让 _advance_simulation 检查并正常终止
-                pass
-            else:
-                heapq.heappush(
-                    self.event_queue,
-                    Event(time=next_decision_time, type=EventType.DECISION_REQUEST, data={"crane_id": crane_id}),
-                )
-
-        else:
-            # 将动作索引映射到同序的可见任务，定位真实队列索引
-            visible_tasks = self._get_visible_tasks()
-            if action >= len(visible_tasks):
-                return self.collision_penalty / self.reward_scale_factor
-            selected_task = visible_tasks[action]
-            # 通过唯一 id 定位在 self.task_queue 中的索引
-            idx_in_queue = next(i for i, t in enumerate(self.task_queue) if t.id == selected_task.id)
-            task_to_assign = self.task_queue.pop(idx_in_queue)
-
-            # 记录移动开始时的位置
-            self.history[crane.id].append((self.current_time, crane.location))
-
-            crane.status = CraneStatus.MOVING
-            crane.current_task = task_to_assign
-
-            travel_distance = abs(crane.location - task_to_assign.location)
-            travel_time = travel_distance / self.crane_speed
-            arrival_time = self.current_time + travel_time
-            
-            # 记录场桥移动指标
-            if travel_distance > 0:
-                self.crane_move_count += 1
-                self.total_crane_move_time += travel_time
-
-            heapq.heappush(
-                self.event_queue,
-                Event(time=arrival_time, type=EventType.CRANE_ARRIVAL, data={"crane_id": crane_id}),
-            )
-
-        self.crane_to_command = None
-        return reward
 
     def reset(self, seed=None, options=None) -> Tuple[Dict, Dict]:
         super().reset(seed=seed)
@@ -473,8 +328,6 @@ class YardEnv(gym.Env):
         # 初始化累积奖励（用于队列时间积分惩罚）
         self.accumulated_reward = 0.0
         self.prev_time = 0.0  # 记录上一次事件的时间
-        # 重置步数
-        self.episode_steps = 0
 
         self.cranes = [
             Crane(id=0, location=self.crane_initial_positions[0], status=CraneStatus.IDLE),
@@ -503,18 +356,18 @@ class YardEnv(gym.Env):
             _,  # truncated is false
             info,
         ) = self._advance_simulation()
+
         return observation, info
 
     def step(self, action: int) -> Tuple[Dict, float, bool, bool, Dict]:
         """执行一个动作，并让环境前进到下一个需要决策的时间点。"""
         # 1. 接收动作并对环境做出即时变更
         reward = self._apply_action(action)
-        # 增加步数（仅统计，不做截断）
-        self.episode_steps += 1
 
         # 2. 推进仿真，直到下一个决策点或仿真结束
+        # 这个函数封装了事件循环的复杂性
         (
-            _,
+            _,  # next_crane_to_command is now in info
             observation,
             event_reward,
             terminated,
@@ -522,13 +375,8 @@ class YardEnv(gym.Env):
             info,
         ) = self._advance_simulation()
 
+        # 3. 组合奖励并返回
         total_reward = reward + event_reward
-
-        # 3. 步数截断：防止策略长时间停留在等待循环
-        should_truncate = self.episode_steps >= self.max_episode_steps
-        if should_truncate:
-            info["termination_reason"] = "max_episode_steps_reached"
-            truncated = True
 
         return (
             observation,
@@ -537,6 +385,60 @@ class YardEnv(gym.Env):
             truncated,
             info,
         )
+
+    def _apply_action(self, action: int) -> float:
+        """根据代理的动作，更新环境状态并返回即时奖励。"""
+        crane_id = self.crane_to_command
+        crane = self.cranes[crane_id]
+        reward = 0
+
+        # 检查动作是否有效
+        action_mask = self._get_action_mask(crane_id)
+        if action_mask[action] == 0:
+            # 惩罚无效动作并终止
+            # 碰撞惩罚也需要相应缩放以保持一致性
+            return self.collision_penalty / self.reward_scale_factor
+
+        # 动作是“等待”
+        wait_action_index = self.max_tasks_in_obs
+        if action == wait_action_index:
+            # 即使是等待，也记录当前状态，以便在图表中显示
+            self.history[crane.id].append((self.current_time, crane.location))
+            crane.status = CraneStatus.IDLE
+            # 移除等待惩罚，新机制下等待不直接产生奖励/惩罚
+            
+            print(f"[{self.current_time:.2f}s] 场桥 {crane_id} 选择等待")
+        # 动作是“分配任务”
+        else:
+            task_to_assign = self.task_queue.pop(action)
+
+            # 记录移动开始时的位置
+            self.history[crane.id].append((self.current_time, crane.location))
+
+            crane.status = CraneStatus.MOVING
+            crane.current_task = task_to_assign
+
+            travel_distance = abs(crane.location - task_to_assign.location)
+            travel_time = travel_distance / self.crane_speed
+            arrival_time = self.current_time + travel_time
+            
+            # 记录场桥移动指标
+            if travel_distance > 0:  # 只有实际移动时才计数
+                self.crane_move_count += 1
+                self.total_crane_move_time += travel_time
+            
+            # 移除阶段性奖励，新机制下不给接受任务奖励
+
+            heapq.heappush(
+                self.event_queue,
+                Event(time=arrival_time, type=EventType.CRANE_ARRIVAL, data={"crane_id": crane_id}),
+            )
+            print(
+                f"[{self.current_time:.2f}s] 场桥 {crane_id} 分配了任务 {task_to_assign.id} 在位置 {task_to_assign.location}. ETA: {arrival_time:.2f}s"
+            )
+
+        self.crane_to_command = None
+        return reward
 
     def _advance_simulation(self) -> Tuple[int, Dict, float, bool, bool, Dict]:
         """事件循环，处理事件直到需要下一个决策或仿真结束。"""
@@ -548,8 +450,10 @@ class YardEnv(gym.Env):
             event = heapq.heappop(self.event_queue)
             
             # 2. 计算队列时间积分惩罚（应用归一化缩放）
+            # 在时间从 prev_time 推进到 event.time 期间，对所有排队任务施加惩罚
             time_delta = event.time - self.prev_time
             queue_penalty = len(self.task_queue) * time_delta
+            # 应用归一化缩放，将奖励数值控制在合理范围内
             scaled_penalty = queue_penalty / self.reward_scale_factor
             self.accumulated_reward -= scaled_penalty
             
@@ -557,96 +461,113 @@ class YardEnv(gym.Env):
             self.current_time = event.time
             self.prev_time = event.time
 
-            # 3. 达到最大模拟时长后：停止任务生成，但继续处理现有事件/任务直到清空积压
-            if self.current_time >= self.max_simulation_time:
+            # 3. 检查是否超时（但不立即结束，等待所有任务完成）
+            if self.current_time >= self.max_simulation_time and not self.task_generation_stopped:
                 self.task_generation_stopped = True
-                # 不截断，继续按事件类型处理，允许完成已到达的任务
+                print(f"[{self.current_time:.2f}s] 达到最大模拟时间，停止生成新任务，等待现有任务完成")
 
             # 4. 根据事件类型处理事件
+            # --------------------------
+            # --- 场桥到达事件 ---
             if event.type == EventType.CRANE_ARRIVAL:
                 crane_id = event.data["crane_id"]
                 crane = self.cranes[crane_id]
                 crane.status = CraneStatus.BUSY
                 crane.location = crane.current_task.location
+
+                # 移除阶段性奖励：不再给到达位置奖励
+
+                # 记录到达时的位置
                 self.history[crane.id].append((self.current_time, crane.location))
+
                 completion_time = self.current_time + crane.current_task.execution_time
                 crane.free_at = completion_time
+
                 heapq.heappush(
                     self.event_queue,
                     Event(time=completion_time, type=EventType.TASK_COMPLETION, data={"crane_id": crane_id}),
                 )
+                print(
+                    f"[{self.current_time:.2f}s] 场桥 {crane_id} 到达位置 {crane.location} 并开始工作"
+                )
+
+            # --------------------------
+            # --- 任务完成事件 ---
             elif event.type == EventType.TASK_COMPLETION:
                 crane_id = event.data["crane_id"]
                 crane = self.cranes[crane_id]
                 completed_task = crane.current_task
+
+                # 移除阶段性奖励：完成任务时不再给奖励，只记录指标
                 task_wait_time = self.current_time - completed_task.creation_time
+                # 记录任务等待时间指标
                 self.total_task_wait_time += task_wait_time
+
+                print(
+                    f"[{self.current_time:.2f}s] 场桥 {crane_id} 完成任务 {completed_task.id}. 等待时间: {task_wait_time:.2f}s"
+                )
+
+                # 更新状态
                 self.completed_tasks.append(completed_task)
                 crane.status = CraneStatus.IDLE
                 crane.current_task = None
                 crane.free_at = self.current_time
+
+                # 记录任务完成时的位置（位置不变，但时间更新）
                 self.history[crane.id].append((self.current_time, crane.location))
+
+                # 为这个刚空闲的crane请求决策
                 heapq.heappush(
                     self.event_queue,
                     Event(time=self.current_time, type=EventType.DECISION_REQUEST, data={"crane_id": crane_id}),
                 )
+
+                # 检查是否有其他空闲的crane，并为它们请求决策（因为环境变了）
                 for other_crane in self.cranes:
                     if other_crane.id != crane.id and other_crane.status == CraneStatus.IDLE:
                         heapq.heappush(
                             self.event_queue,
                             Event(time=self.current_time, type=EventType.DECISION_REQUEST, data={"crane_id": other_crane.id})
                         )
+
+            # --------------------------
+            # --- 新任务生成事件 ---
             elif event.type == EventType.TASK_GENERATION:
                 self._generate_new_task()
+                # 检查是否有空闲的crane，并为它们请求决策
                 for crane in self.cranes:
                     if crane.status == CraneStatus.IDLE:
                         heapq.heappush(
                             self.event_queue,
                             Event(time=self.current_time, type=EventType.DECISION_REQUEST, data={"crane_id": crane.id})
                         )
+
+            # --------------------------
+            # --- 决策请求事件 ---
             elif event.type == EventType.DECISION_REQUEST:
                 crane_id_to_command = event.data["crane_id"]
+                # 检查这个决策请求是否仍然有效 (crane是否还是IDLE)
                 if self.cranes[crane_id_to_command].status == CraneStatus.IDLE:
-                    # 如果当前场桥无可执行任务（除等待外），而另一台场桥可执行任务，则优先切换到另一台场桥，避免无限等待
-                    # 先为当前场桥设置待指令，以便正确计算动作掩码
-                    self.crane_to_command = crane_id_to_command
-                    current_mask = self._get_action_mask(crane_id_to_command)
-                    has_executable = np.any(current_mask[:-1] == 1)
-                    if not has_executable:
-                        other_id = 1 - crane_id_to_command
-                        if self.cranes[other_id].status == CraneStatus.IDLE:
-                            # 切换到另一台场桥并检查其动作掩码
-                            self.crane_to_command = other_id
-                            other_mask = self._get_action_mask(other_id)
-                            other_has_exec = np.any(other_mask[:-1] == 1)
-                            if other_has_exec:
-                                observation = self._get_observation(other_id)
-                                info = self._get_info()
-                                reward_to_return = self.accumulated_reward
-                                self.accumulated_reward = 0.0
-                                return other_id, observation, reward_to_return, False, False, info
-                    # 默认返回当前场桥的决策
                     self.crane_to_command = crane_id_to_command
                     observation = self._get_observation(crane_id_to_command)
                     info = self._get_info()
-                    reward_to_return = self.accumulated_reward
-                    self.accumulated_reward = 0.0
-                    return crane_id_to_command, observation, reward_to_return, False, False, info
+                    # 找到决策点，返回，暂停事件循环
+                    return crane_id_to_command, observation, self.accumulated_reward, False, False, info
 
         # 如果事件队列为空，检查是否所有任务都已完成
         all_cranes_idle = all(crane.status == CraneStatus.IDLE for crane in self.cranes)
         no_pending_tasks = len(self.task_queue) == 0
         
         if all_cranes_idle and no_pending_tasks:
+            print(f"[{self.current_time:.2f}s] 所有任务已完成，所有场桥空闲，仿真结束")
             final_obs = self._get_observation(0)
             final_info = self._get_info()
-            # 若在达到时间上限后清空积压，给出更准确的终止原因
-            if self.current_time >= self.max_simulation_time:
-                final_info["termination_reason"] = "all_tasks_completed_after_time_limit"
-            else:
-                final_info["termination_reason"] = "all_tasks_completed"
+            final_info["termination_reason"] = "all_tasks_completed"
             return 0, final_obs, self.accumulated_reward, True, False, final_info
         else:
+            # 如果还有未完成的任务但事件队列为空，这是一个异常情况
+            print(f"[{self.current_time:.2f}s] 警告：事件队列为空但仍有未完成任务或忙碌的场桥")
+            print(f"待处理任务数: {len(self.task_queue)}, 场桥状态: {[crane.status for crane in self.cranes]}")
             final_obs = self._get_observation(0)
             final_info = self._get_info()
             final_info["termination_reason"] = "event_queue_empty_with_pending_tasks"
