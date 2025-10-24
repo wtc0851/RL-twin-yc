@@ -19,9 +19,9 @@ class Task:
     """
     id: int  # 任务的唯一标识符
     location: int  # 任务需要操作的贝位（1-50）
+    init_time: float  # 任务被创建（生成）的时间点（模拟分钟）
     available_time: float  # 任务可以开始处理的最早时间（模拟分钟）
     execution_time: float  # 任务执行需要花费的时间（模拟分钟）
-    creation_time: float  # 任务被创建（生成）的时间点（模拟分钟）
 
 
 @dataclass

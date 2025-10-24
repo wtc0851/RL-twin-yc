@@ -1,15 +1,17 @@
 import os
 import sys
+import json
+import types
 import gymnasium as gym
+import numpy as np
 
 # 将项目根目录添加到 Python 路径中
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.environment.env import YardEnv
+from src.environment.env_1022 import YardEnv, Event, EventType
+from src.environment.dataclasses import Task
 from sb3_contrib import MaskablePPO
 from sb3_contrib.common.wrappers import ActionMasker
-from tests.static_tasks import TASK_LIST
-import numpy as np
 
 
 def mask_fn(env: gym.Env) -> np.ndarray:
@@ -17,21 +19,57 @@ def mask_fn(env: gym.Env) -> np.ndarray:
     return env.action_mask()
 
 
+def patch_static_generator(inner_env: YardEnv, static_tasks: list[Task]) -> None:
+    """将 env_1022 的任务生成函数替换为静态数据驱动的版本。"""
+    inner_env.static_tasks = sorted(static_tasks, key=lambda t: t.available_time)
+    inner_env.static_task_index = 0
+
+    def _generate_new_tasks_static(self: YardEnv) -> None:
+        window_start = self.current_time
+        window_end = window_start + self.task_interval
+        while self.static_task_index < len(self.static_tasks):
+            t = self.static_tasks[self.static_task_index]
+            if t.available_time >= window_end:
+                break
+            if window_start <= t.available_time < window_end:
+                self.task_queue.append(t)
+                self.static_task_index += 1
+            else:
+                if t.available_time < window_start:
+                    self.static_task_index += 1
+                else:
+                    break
+        next_window_time = window_start + self.task_interval
+        if next_window_time < self.max_simulation_time:
+            inner_env.event_queue.append(Event(time=next_window_time, type=EventType.TASK_GENERATION, data={}))
+        else:
+            self.task_generation_stopped = True
+
+    inner_env._generate_new_tasks = types.MethodType(_generate_new_tasks_static, inner_env)
+
+
 def main():
     """
-    使用静态任务数据加载训练好的 PPO 模型，并在 YardEnv 环境中运行它以进行可视化。
+    使用静态任务数据加载训练好的 PPO 模型，并在 YardEnv_1022 环境中运行它以进行可视化。
     """
-    print("--- 开始使用静态任务数据评估训练好的 PPO 模型 ---")
+    print("--- 开始使用静态任务数据评估训练好的 PPO 模型 (env_1022) ---")
+
+    # 读取静态任务数据（env_1022 生成机制）
+    data_path = os.path.join(os.path.dirname(__file__), "static_tasks_env1022.json")
+    with open(data_path, "r", encoding="utf-8") as f:
+        raw_tasks = json.load(f)
+    static_tasks = [Task(**t) for t in raw_tasks]
 
     # 创建一个用于评估的环境实例，使用静态任务数据
-    env = YardEnv(render_mode='human', static_tasks=TASK_LIST)  # 使用 'human' 模式以收集绘图数据
+    env = YardEnv(render_mode='human')  # 使用 'human' 模式以收集绘图数据
     env = ActionMasker(env, mask_fn)
+    patch_static_generator(env.env, static_tasks)
 
     # 加载之前训练并保存的模型
-    model_path = os.path.join("models", "ppo_yard_model.zip")
+    model_path = os.path.join("models", "ppo_env1022_model.zip")
     if not os.path.exists(model_path):
         print(f"错误：找不到模型文件 at {model_path}")
-        print("请先运行 train_ppo.py 脚本来训练和保存模型。")
+        print("请先运行 src/agents/train_ppo.py 脚本来训练和保存模型。")
         return
 
     model = MaskablePPO.load(model_path, env=env)
@@ -58,6 +96,7 @@ def main():
     print(f"场桥移动次数: {info['crane_move_count']}")
     print(f"场桥移动总时间: {info['total_crane_move_time']:.2f}s")
     print(f"场桥等待总时间: {info['total_crane_wait_time']:.2f}s")
+    print(f"场桥闲置总时间: {info.get('total_crane_idle_time', 0.0):.2f}s")
     print(f"已完成任务数: {info['completed_tasks_count']}")
     print(f"总仿真时间: {info['simulation_time']:.2f}s")
 

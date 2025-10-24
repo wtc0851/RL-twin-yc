@@ -1,12 +1,16 @@
 import os
 import sys
+import json
 import gymnasium as gym
 import numpy as np
+from typing import List, Tuple
 
 # 将项目根目录添加到 Python 路径中
-sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append(PROJECT_ROOT)
 
 from src.environment.env_1022 import YardEnv
+from src.environment.dataclasses import Task
 from sb3_contrib import MaskablePPO
 from sb3_contrib.common.wrappers import ActionMasker
 from stable_baselines3.common.env_checker import check_env
@@ -17,6 +21,19 @@ from stable_baselines3.common.callbacks import BaseCallback
 def mask_fn(env: gym.Env) -> np.ndarray:
     """一个辅助函数，用于从环境中提取动作掩码。"""
     return env.action_mask()
+
+
+def load_static_tasks(data_path: str) -> List[Task]:
+    """从 JSON 文件加载静态任务，转换为 Task 列表。"""
+    if not os.path.isabs(data_path):
+        data_path = os.path.join(PROJECT_ROOT, data_path)
+    if not os.path.exists(data_path):
+        raise FileNotFoundError(f"未找到静态任务文件: {data_path}")
+    with open(data_path, "r", encoding="utf-8") as f:
+        raw_tasks = json.load(f)
+    tasks = [Task(**t) for t in raw_tasks]
+    return tasks
+
 
 class RewardLoggingCallback(BaseCallback):
     def _on_step(self) -> bool:
@@ -40,49 +57,37 @@ class RewardLoggingCallback(BaseCallback):
 
         return True
 
-def train_ppo_env1022(
+
+def train_ppo_static(
     timesteps: int = 1_000_000,
     n_envs: int = 8,
     tb_dir: str = "./ppo_tensorboard/",
-    save_path: str = os.path.join("models", "ppo_env1022_model.zip"),
+    save_path: str = os.path.join("models", "ppo_env1022_model_static.zip"),
     skip_check: bool = True,
+    static_data_path: str = os.path.join("tests", "static_tasks_env1022.json"),
     env_kwargs: dict | None = None,
     policy_kwargs: dict | None = None,
     model_kwargs: dict | None = None,
     evaluate_steps: int = 1000,
     seed: int = 42,
-):
+) -> Tuple[MaskablePPO, str]:
     """
-    训练并评估基于 MaskablePPO 的智能体（适配 env_1022）。不使用 CLI，提供函数式参数。
-
-    参数说明：
-    - timesteps: 训练总步数。
-    - n_envs: 并行环境数量（使用 DummyVecEnv）。
-    - tb_dir: TensorBoard 日志目录。
-    - save_path: 模型保存路径（.zip）。
-    - skip_check: 是否跳过 `check_env` 环境校验（建议 True，避免掩码动作兼容性问题）。
-    - env_kwargs: 传递给 `YardEnv` 的构造参数字典，例如 `{"static_tasks": tasks}`。
-    - policy_kwargs: 传递给策略的结构参数（如网络结构）。
-    - model_kwargs: 覆盖 PPO 的超参数字典（如学习率、n_steps、batch_size 等）。
-    - evaluate_steps: 训练完成后评估的步数。
-    - seed: 随机种子。
-
-    返回：
-    - model: 训练完成的 `MaskablePPO` 模型实例。
-    - save_path: 最终保存的模型路径。
-
-    使用示例：
-        from src.agents.train_ppo import train_ppo_env1022
-        model, path = train_ppo_env1022(timesteps=200_000, n_envs=4,
-                                        env_kwargs={"render_mode": None})
+    使用静态任务数据训练 MaskablePPO（适配 env_1022）。
+    - 从 `static_data_path` 加载任务并注入环境。
+    - 仅记录中文标签“回合/总奖励”。
     """
-    print("--- 开始 PPO 训练 (env_1022) ---")
+    print("--- 开始 PPO 训练 (env_1022, 静态数据) ---")
+
+    # 加载静态任务
+    static_tasks = load_static_tasks(static_data_path)
+    print(f"已加载静态任务数量: {len(static_tasks)}")
 
     env_kwargs = env_kwargs or {}
+    env_kwargs.update({"static_tasks": static_tasks})
 
     # 可选：环境校验
     if not skip_check:
-        print("正在检查环境兼容性...")
+        print("正在检查环境兼容性（静态数据）...")
         env_instance = YardEnv(**env_kwargs)
         try:
             check_env(env_instance, warn=True)
@@ -91,7 +96,6 @@ def train_ppo_env1022(
             print(f"环境校验失败: {e}，跳过并继续训练。")
 
     # 并行向量环境
-    # 注意：避免与 env_kwargs 中的 render_mode 重复传参
     base_envs = [lambda: ActionMasker(YardEnv(**env_kwargs), mask_fn) for _ in range(n_envs)]
     env = DummyVecEnv(base_envs)
     env = VecMonitor(env)
@@ -138,7 +142,7 @@ def train_ppo_env1022(
     print(f"模型已保存至: {save_path}")
 
     # 评估（带动作掩码）
-    print("--- 开始评估训练好的模型 ---")
+    print("--- 开始评估训练好的模型（静态数据） ---")
     obs = env.reset()
     for _ in range(int(evaluate_steps)):
         action_masks_list = env.env_method("action_masks")
@@ -154,12 +158,14 @@ def train_ppo_env1022(
 
 if __name__ == "__main__":
     # 直接调用训练函数，不使用命令行参数
-    model, path = train_ppo_env1022(
-        timesteps=2_000_000,
+    default_json = os.path.join(PROJECT_ROOT, "tests", "static_tasks_env1022.json")
+    model, path = train_ppo_static(
+        timesteps=1_000_000,
         n_envs=4,
         tb_dir="./ppo_tensorboard/",
-        save_path=os.path.join("models", "ppo_env1022_model.zip"),
+        save_path=os.path.join("models", "ppo_env1022_model_static.zip"),
         skip_check=True,
+        static_data_path=default_json,
         env_kwargs={"render_mode": None},
         evaluate_steps=1000,
         seed=42,
