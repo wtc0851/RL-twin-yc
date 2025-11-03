@@ -7,7 +7,7 @@ import numpy as np
 # 将项目根目录添加到 Python 路径中
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.environment.env_1022 import YardEnv
+from src.environment.env import YardEnv
 from src.environment.dataclasses import Task
 from sb3_contrib.common.wrappers import ActionMasker
 
@@ -20,14 +20,14 @@ def mask_fn(env: gym.Env) -> np.ndarray:
 def run(use_static_data: bool = True):
     """
     运行随机策略测试。
-    - use_static_data=True 时，从 tests/static_tasks_env1022.json 加载静态任务并注入环境。
+    - use_static_data=True 时，从 tests/static_tasks_env.json 加载静态任务并注入环境。
     - use_static_data=False 时，使用环境自身的随机任务生成机制。
     """
-    print("--- 开始评估随机策略 (env_1022)，静态数据: {} ---".format(use_static_data))
+    print("--- 开始评估随机策略 (env)，静态数据: {} ---".format(use_static_data))
 
     static_tasks = None
     if use_static_data:
-        data_path = os.path.join(os.path.dirname(__file__), "static_tasks_env1022.json")
+        data_path = os.path.join(os.path.dirname(__file__), "static_tasks_env.json")
         with open(data_path, "r", encoding="utf-8") as f:
             raw_tasks = json.load(f)
         static_tasks = [Task(**t) for t in raw_tasks]
@@ -60,6 +60,7 @@ def run(use_static_data: bool = True):
     print(f"场桥移动次数: {info['crane_move_count']}")
     print(f"场桥移动总时间: {info['total_crane_move_time']:.2f}s")
     print(f"场桥等待总时间: {info['total_crane_wait_time']:.2f}s")
+    print(f"场桥闲置总时间: {info['total_crane_idle_time']:.2f}s")
     print(f"已完成任务数: {info['completed_tasks_count']}")
     print(f"总仿真时间: {info['simulation_time']:.2f}s")
     print(f"步数: {info['step_count']}")

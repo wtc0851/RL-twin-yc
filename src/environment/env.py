@@ -46,26 +46,26 @@ class YardEnv(gym.Env):
         self.num_bays = 50  # 贝位数量
         self.num_cranes = 2  # 场桥数量
         self.crane_speed = 2  # 场桥移动速度 (单位: 贝位/秒)
-        self.safe_distance = 0  # 场桥安全距离 (单位: 贝位)
+        self.safe_distance = 2  # 场桥安全距离 (单位: 贝位)
 
 
-        self.task_interval = 180.0  # 固定时间窗生成任务
-        self.task_num_per_window = 5  # 固定时间窗生成任务数量
-        self.mean_task_arrieve_internel = self.task_interval / self.task_num_per_window  # 任务到达间隔 (单位: 秒)
+        self.task_interval = 180.0  # 任务生成窗口大小 (单位: 秒)
+        self.task_num_per_window = 5  # 每个窗口内平均生成的任务数量 (泊松分布的lambda)
+        self.mean_task_arrieve_internel = self.task_interval / self.task_num_per_window  # 平均任务到达间隔 (单位: 秒)
 
 
         self.mean_task_execution_time = 60.0  # 任务耗时 (单位: 秒)
         self.max_simulation_time = 3600.0  # 最大模拟时间 (单位: 秒)  1小时
 
 
-        self.max_tasks_in_obs = 10  # 代理能观察到的最大任务数量
+        self.max_tasks_in_obs = 20  # 代理能观察到的最大任务数量
         self.crane_initial_positions = [1, self.num_bays]  # 场桥初始位置
 
 
         # --- 奖励设计 ---
-        self.reward_scale_factor = 100.0  # 奖励归一化缩放因子，用于控制奖励数值范围
-
-
+        self.reward_scale_factor = 10.0  # 奖励归一化缩放因子，用于控制奖励数值范围
+        self.step_penalty_factor = -1.0  # 单步惩罚系数
+        self.previous_time = 0.0  # 记录上一步的时间，用于计算时间差
 
         # --- 动作空间和状态空间 ---
         self.action_space = spaces.Discrete(self.max_tasks_in_obs + 1)
@@ -148,8 +148,9 @@ class YardEnv(gym.Env):
             else:
                 self.task_generation_stopped = True
         else:
-            # 原有随机窗口生成逻辑
-            offsets = sorted(random.uniform(0.0, self.task_interval) for _ in range(self.task_num_per_window))
+            # 改为泊松分布生成任务
+            num_tasks_in_window = np.random.poisson(self.task_num_per_window)
+            offsets = sorted(random.uniform(0.0, self.task_interval) for _ in range(num_tasks_in_window))
             for off in offsets:
                 arrival_time = window_start + off
                 if arrival_time >= self.max_simulation_time:
@@ -276,7 +277,7 @@ class YardEnv(gym.Env):
 
     def _get_action_mask(self, crane_id: int) -> np.ndarray:
         mask = np.zeros(self.action_space.n, dtype=np.int8)
-        # 当没有待指令的场桥时，至少允许“等待”动作
+        # 当没有待指令的场桥时，至少允许“闲置”动作
         if self.crane_to_command is None:
             mask[-1] = 1
             return mask
@@ -287,7 +288,7 @@ class YardEnv(gym.Env):
             if self._is_task_feasible_for_crane(crane_id, task):
                 mask[i] = 1
 
-        # 若存在可执行任务则关闭“等待”，否则只允许“等待”
+        # 若存在可执行任务则关闭“闲置”，否则只允许“闲置”
         if np.any(mask[:self.max_tasks_in_obs] == 1):
             mask[-1] = 0
         else:
@@ -322,6 +323,23 @@ class YardEnv(gym.Env):
             "total_crane_idle_time": self.total_crane_idle_time,
         }
 
+    def _calculate_step_penalty(self) -> float:
+        """
+        计算单步惩罚：(剩余已到达未完成任务数量) * (时间差) * 惩罚系数
+        """
+        # 计算时间差
+        time_diff = self.current_time - self.previous_time
+        
+        # 统计已到达但未完成的任务数量
+        overdue_tasks_count = 0
+        for task in self.task_queue:
+            if task.available_time <= self.current_time:
+                overdue_tasks_count += 1
+        
+        # 计算惩罚值
+        penalty = overdue_tasks_count * time_diff * self.step_penalty_factor
+        return penalty
+
 
     def _apply_action(self, action: int) -> float:
         """根据代理的动作，更新环境状态并返回即时奖励。"""
@@ -338,6 +356,20 @@ class YardEnv(gym.Env):
             self.history[crane.id].append((self.current_time, crane.location))
             crane.status = CraneStatus.IDLE
             # 闲置动作不再主动推送决策事件，避免同刻事件堆积
+
+            next_task_init_time = 0
+            for event in self.event_queue:
+                if event.type == EventType.TASK_GENERATION:
+                    next_task_init_time = event.time
+                    break
+            if next_task_init_time != 0:
+
+                step_duration = next_task_init_time - self.current_time
+                self.total_crane_idle_time += step_duration
+                print(f"next_task_init_time: {next_task_init_time}, step_duration: {step_duration}, current_time: {self.current_time}")
+
+
+            # 这里要统计闲置的时间
         else:
             # 使用最近一次观测的可见任务快照，避免索引错位
             visible_tasks = self._last_visible_tasks if self._last_visible_tasks else self._get_visible_tasks()
@@ -406,6 +438,10 @@ class YardEnv(gym.Env):
 
         # 重置步数
         self.episode_steps = 0
+        
+        # 重置时间相关变量
+        self.current_time = 0.0
+        self.previous_time = 0.0
 
         self.cranes = [
             Crane(id=0, location=self.crane_initial_positions[0], status=CraneStatus.IDLE),
@@ -453,7 +489,14 @@ class YardEnv(gym.Env):
             info,
         ) = self._advance_simulation()
 
-        total_reward = reward + event_reward
+        # 3. 计算单步惩罚（基于时间差和已到达未完成任务数）
+        step_penalty = self._calculate_step_penalty()
+
+        # 4. 更新上一步时间戳
+        self.previous_time = self.current_time
+
+        # 5. 组合奖励并进行缩放
+        total_reward = (reward + event_reward + step_penalty) / self.reward_scale_factor
 
         # 舍弃“步数截断”逻辑，避免重复决策导致非预期截断
         truncated = False
@@ -488,33 +531,31 @@ class YardEnv(gym.Env):
                 crane = self.cranes[crane_id]
                 target_loc = crane.current_task.location
 
-                # 到达前顺序守卫：确保 0号在左、1号在右（含安全距离），否则取消到达并重新决策
-                if crane_id == 0:
-                    if target_loc + self.safe_distance > self.cranes[1].location:
-                        # 取消到达：不更新位置，任务回退入队，并立刻请求该场桥新决策
-                        self.history[crane.id].append((self.current_time, crane.location))
-                        crane.status = CraneStatus.IDLE
-                        failed_task = crane.current_task
-                        crane.current_task = None
-                        self.task_queue.append(failed_task)
-                        heapq.heappush(
-                            self.event_queue,
-                            Event(time=self.current_time, type=EventType.DECISION_REQUEST, data={"crane_id": crane_id}),
-                        )
-                        continue
-                else:
-                    if self.cranes[0].location + self.safe_distance > target_loc:
-                        # 取消到达：不更新位置，任务回退入队，并立刻请求该场桥新决策
-                        self.history[crane.id].append((self.current_time, crane.location))
-                        crane.status = CraneStatus.IDLE
-                        failed_task = crane.current_task
-                        crane.current_task = None
-                        self.task_queue.append(failed_task)
-                        heapq.heappush(
-                            self.event_queue,
-                            Event(time=self.current_time, type=EventType.DECISION_REQUEST, data={"crane_id": crane_id}),
-                        )
-                        continue
+                # 到达前最终守卫：检查与另一台场桥的最终位置是否冲突
+                other_crane = self.cranes[1 - crane_id]
+                other_crane_pos = other_crane.location
+
+                # 如果另一台场桥也在移动，必须用它的目标位置作为检查基准
+                if other_crane.status == CraneStatus.MOVING and other_crane.current_task:
+                    other_crane_pos = other_crane.current_task.location
+
+                # 根据场桥ID确定左右位置
+                crane0_pos = target_loc if crane_id == 0 else other_crane_pos
+                crane1_pos = other_crane_pos if crane_id == 0 else target_loc
+
+                # 最终检查：0号场桥的最终位置必须在1号的左边（含安全距离）
+                if crane0_pos + self.safe_distance > crane1_pos:
+                    # 检测到冲突，取消本次到达
+                    self.history[crane.id].append((self.current_time, crane.location))
+                    crane.status = CraneStatus.IDLE
+                    failed_task = crane.current_task
+                    crane.current_task = None
+                    self.task_queue.append(failed_task)
+                    heapq.heappush(
+                        self.event_queue,
+                        Event(time=self.current_time, type=EventType.DECISION_REQUEST, data={"crane_id": crane_id}),
+                    )
+                    continue  # 跳过此事件，处理下一个
 
                 # 到达目标位置（通过顺序守卫校验后）
                 crane.location = target_loc
@@ -603,27 +644,16 @@ class YardEnv(gym.Env):
 
         final_obs = self._get_observation(0)
         final_info = self._get_info()
+
         # 若在达到时间上限后清空积压，给出更准确的终止原因
-        if all_cranes_idle and no_pending_tasks:
-            if self.current_time >= self.max_simulation_time:
-                final_info["termination_reason"] = "all_tasks_completed_after_time_limit"
-            else:
-                final_info["termination_reason"] = "all_tasks_completed"
+        if all_cranes_idle and no_pending_tasks and self.current_time >= self.max_simulation_time:
+            final_info["termination_reason"] = "all_tasks_completed_after_time_limit"
+            print('仿真正常结束')
+            return 0, final_obs, 0.0, True, False, final_info
         else:
-            print(f"current_time: {self.current_time}")
-            # 若不存在未来任务生成事件，则认为仿真自然结束（保持闲置），不再安排决策
-            has_future_generation = any(
-                e.type == EventType.TASK_GENERATION and e.time > self.current_time
-                for e in self.event_queue
-            )
-            if not has_future_generation:
-                final_info["termination_reason"] = "no_future_generation_event"
-                print(f"all_cranes_idle, no_pending_tasks: {all_cranes_idle}, {no_pending_tasks}")
-            else:
-                final_info["termination_reason"] = "event_queue_empty_with_pending_tasks"
-        # 稀疏惩罚：仅在回合结束时一次性给出（负的总任务等待时间）
-        # 若终止原因不是 all_tasks_completed_after_time_limit，则追加固定惩罚 30000
-        return 0, final_obs, -(self.total_task_wait_time), True, False, final_info
+            final_info["termination_reason"] = "no_future_generation_event"
+            # print(f"仿真异常结束，原因：{final_info['termination_reason']}")
+            return 0, final_obs, -1000, True, False, final_info
 
     def plot_crane_trajectories(self, save_path="crane_trajectory.png"):
         """
@@ -637,7 +667,7 @@ class YardEnv(gym.Env):
         colors = ['blue', 'red']
         linestyles = ['--', '-']
         labels = ['ARMG1', 'ARMG2']
-
+ 
         for crane_id in range(self.num_cranes):
             history = self.history[crane_id]
             if not history:

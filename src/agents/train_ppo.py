@@ -6,7 +6,7 @@ import numpy as np
 # 将项目根目录添加到 Python 路径中
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from src.environment.env_1022 import YardEnv
+from src.environment.env import YardEnv
 from sb3_contrib import MaskablePPO
 from sb3_contrib.common.wrappers import ActionMasker
 from stable_baselines3.common.env_checker import check_env
@@ -26,10 +26,20 @@ class RewardLoggingCallback(BaseCallback):
             ep = info.get("episode")
             if isinstance(ep, dict) and "r" in ep:
                 try:
-                    # 仅记录中文标签的每回合总奖励
+                    # 记录每回合总奖励
                     self.logger.record("回合/总奖励", float(ep["r"]))
-                except Exception:
-                    pass
+
+                    # 新增：计算并记录任务平均等待时间
+                    total_wait_time = info.get("total_task_wait_time")
+                    completed_tasks = info.get("completed_tasks_count")
+
+                    if total_wait_time is not None and completed_tasks is not None and completed_tasks > 0:
+                        average_wait_time = total_wait_time / completed_tasks
+                        self.logger.record("回合/任务平均等待时间", average_wait_time)
+
+                except Exception as e:
+                    # 增加打印异常，方便调试
+                    print(f"Error in RewardLoggingCallback: {e}")
 
         if isinstance(infos, list):
             for info in infos:
@@ -53,7 +63,7 @@ def train_ppo_env1022(
     seed: int = 42,
 ):
     """
-    训练并评估基于 MaskablePPO 的智能体（适配 env_1022）。不使用 CLI，提供函数式参数。
+    训练并评估基于 MaskablePPO 的智能体（适配 env）。不使用 CLI，提供函数式参数。
 
     参数说明：
     - timesteps: 训练总步数。
@@ -76,7 +86,7 @@ def train_ppo_env1022(
         model, path = train_ppo_env1022(timesteps=200_000, n_envs=4,
                                         env_kwargs={"render_mode": None})
     """
-    print("--- 开始 PPO 训练 (env_1022) ---")
+    print("--- 开始 PPO 训练 (env) ---")
 
     env_kwargs = env_kwargs or {}
 
@@ -155,10 +165,10 @@ def train_ppo_env1022(
 if __name__ == "__main__":
     # 直接调用训练函数，不使用命令行参数
     model, path = train_ppo_env1022(
-        timesteps=2_000_000,
+        timesteps=3_000_000,
         n_envs=4,
         tb_dir="./ppo_tensorboard/",
-        save_path=os.path.join("models", "ppo_env1022_model.zip"),
+        save_path=os.path.join("models", "ppo_env_model.zip"),
         skip_check=True,
         env_kwargs={"render_mode": None},
         evaluate_steps=1000,

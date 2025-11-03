@@ -7,7 +7,7 @@ import numpy as np
 # 将项目根目录添加到 Python 路径中
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.environment.env_1022 import YardEnv
+from src.environment.env import YardEnv
 from src.environment.dataclasses import Task
 from sb3_contrib.common.wrappers import ActionMasker
 
@@ -19,15 +19,15 @@ def mask_fn(env: gym.Env) -> np.ndarray:
 
 def run(use_static_data: bool = True):
     """
-    使用静态或随机任务数据在 YardEnv_1022 环境中运行最近任务选择策略。
+    使用静态或随机任务数据在 Yardenv 环境中运行最近任务选择策略。
     - use_static_data=True 时，从 JSON 加载静态任务注入环境。
     - use_static_data=False 时，使用环境随机生成。
     """
-    print("--- 开始评估最近任务选择策略 (env_1022)，静态数据: {} ---".format(use_static_data))
+    print("--- 开始评估最近任务选择策略 (env)，静态数据: {} ---".format(use_static_data))
 
     static_tasks = None
     if use_static_data:
-        data_path = os.path.join(os.path.dirname(__file__), "static_tasks_env1022.json")
+        data_path = os.path.join(os.path.dirname(__file__), "static_tasks_env.json")
         with open(data_path, "r", encoding="utf-8") as f:
             raw_tasks = json.load(f)
         static_tasks = [Task(**t) for t in raw_tasks]
