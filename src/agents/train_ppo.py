@@ -6,7 +6,9 @@ import numpy as np
 # 将项目根目录添加到 Python 路径中
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from src.environment.env import YardEnv
+# from src.environment.env import YardEnv
+from src.environment.env_penalty import YardEnv
+
 from sb3_contrib import MaskablePPO
 from sb3_contrib.common.wrappers import ActionMasker
 from stable_baselines3.common.env_checker import check_env
@@ -165,7 +167,7 @@ def train_ppo_env1022(
 if __name__ == "__main__":
     # 直接调用训练函数，不使用命令行参数
     model, path = train_ppo_env1022(
-        timesteps=3_000_000,
+        timesteps=2_000_000,
         n_envs=4,
         tb_dir="./ppo_tensorboard/",
         save_path=os.path.join("models", "ppo_env_model.zip"),

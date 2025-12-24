@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 生成静态任务数据，任务到达过程遵循泊松过程。
 
@@ -26,7 +25,7 @@ def generate_tasks_poisson(
     num_bays: int = 50,
     task_interval: float = 180.0,
     tasks_per_window: int = 5,
-    mean_exec_time: float = 60.0,
+    mean_exec_time: float = 45.0,
     max_sim_time: float = 3600.0,
     arrival_rate: Optional[float] = None,
 ) -> List[Dict[str, Any]]:
@@ -49,7 +48,8 @@ def generate_tasks_poisson(
         if arrival_time >= max_sim_time:
             break
         location = random.randint(1, num_bays)
-        execution_time = random.expovariate(1.0 / mean_exec_time)
+        # 修改为固定耗时
+        execution_time = mean_exec_time
         window_start = math.floor(arrival_time / task_interval) * task_interval
         tasks.append({
             "id": task_id,
@@ -99,7 +99,7 @@ def generate_static_tasks(
     num_bays: int = 50,
     task_interval: float = 180.0,
     tasks_per_window: int = 5,
-    mean_exec_time: float = 60.0,
+    mean_exec_time: float = 45.0,
     max_sim_time: float = 3600.0,
     arrival_rate: Optional[float] = None,
     output_format: str = "json",
@@ -138,7 +138,12 @@ def generate_static_tasks(
 def main() -> None:
     """默认调用：生成 JSON 文件到同目录。"""
     default_out = Path(__file__).with_name("static_tasks_env.json")
-    generate_static_tasks(out=str(default_out), output_format="json")
+    generate_static_tasks(
+        out=str(default_out),
+        output_format="json",
+        tasks_per_window=9,
+        seed=4,
+    )
 
 
 if __name__ == "__main__":

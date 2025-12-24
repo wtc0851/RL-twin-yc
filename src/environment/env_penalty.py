@@ -1,10 +1,11 @@
 """
 奖惩机制说明 (Reward Mechanism):
-本环境采用 **稀疏奖励 (Sparse Reward)** 机制，即 **延迟惩罚**。
-- 每一步 (step) 的即时奖励为 0。
-- 仅在回合结束 (Episode End) 时，计算一次性总惩罚。
-- 总惩罚 = -(所有任务的总等待时间) / 缩放因子。
-- 目标：最小化所有任务的累计等待时间。
+本环境采用 **稠密奖励 (Dense Reward)** 机制，即 **逐步惩罚 (Step-based Penalty)**。
+- 每一步 (step) 都会计算惩罚值。
+- 单步惩罚 = (当前已到达但未完成的任务数量) * (距离上一步的时间差) * (-1.0)。
+- 最终奖励 = 单步惩罚 / 缩放因子。
+- 异常结束时会有额外的大额惩罚 (-1000)。
+- 目标：通过在每一步尽量减少积压任务数量，从而最小化总的加权等待时间。
 """
 import heapq
 import math
@@ -47,7 +48,7 @@ class YardEnv(gym.Env):
     """
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 4}
 
-    def __init__(self, render_mode=None, static_tasks=None):
+    def __init__(self, render_mode=None, static_tasks=None, **kwargs):
         super().__init__()
 
         # --- 环境核心参数---
@@ -58,15 +59,15 @@ class YardEnv(gym.Env):
 
 
         self.task_interval = 180.0  # 任务生成窗口大小 (单位: 秒)
-        self.task_num_per_window = 5  # 每个窗口内平均生成的任务数量 (泊松分布的lambda)
+        self.task_num_per_window = 9  # 每个窗口内平均生成的任务数量 (泊松分布的lambda)
         self.mean_task_arrieve_internel = self.task_interval / self.task_num_per_window  # 平均任务到达间隔 (单位: 秒)
 
 
-        self.mean_task_execution_time = 60.0  # 任务耗时 (单位: 秒)
+        self.mean_task_execution_time = 45.0  # 任务耗时 (单位: 秒)
         self.max_simulation_time = 3600.0  # 最大模拟时间 (单位: 秒)  1小时
 
 
-        self.max_tasks_in_obs = 20  # 代理能观察到的最大任务数量
+        self.max_tasks_in_obs = 30  # 代理能观察到的最大任务数量
         self.crane_initial_positions = [1, self.num_bays]  # 场桥初始位置
 
 
@@ -166,7 +167,8 @@ class YardEnv(gym.Env):
                     break
                 task_id = len(self.completed_tasks) + len(self.task_queue)
                 location = random.randint(1, self.num_bays)
-                execution_time = random.expovariate(1.0 / self.mean_task_execution_time)
+                # 修改为固定耗时
+                execution_time = self.mean_task_execution_time
                 new_task = Task(
                     id=task_id,
                     init_time=window_start,
@@ -497,9 +499,14 @@ class YardEnv(gym.Env):
             info,
         ) = self._advance_simulation()
 
-        # 回合内不再进行每步惩罚；仅在仿真终止时由 _advance_simulation 返回一次性总惩罚。
-        # 组合奖励并进行缩放（此处 reward 通常为 0，event_reward 在终止时为总惩罚）。
-        total_reward = (event_reward) / self.reward_scale_factor
+        # 3. 计算单步惩罚（基于时间差和已到达未完成任务数）
+        step_penalty = self._calculate_step_penalty()
+
+        # 4. 更新上一步时间戳
+        self.previous_time = self.current_time
+
+        # 5. 组合奖励并进行缩放
+        total_reward = (reward + event_reward + step_penalty) / self.reward_scale_factor
 
         # 舍弃“步数截断”逻辑，避免重复决策导致非预期截断
         truncated = False
@@ -648,16 +655,15 @@ class YardEnv(gym.Env):
         final_obs = self._get_observation(0)
         final_info = self._get_info()
 
-        # 仅在回合结束时返回一次性总惩罚：所有任务的总等待时间（负值）。
+        # 若在达到时间上限后清空积压，给出更准确的终止原因
         if all_cranes_idle and no_pending_tasks and self.current_time >= self.max_simulation_time:
             final_info["termination_reason"] = "all_tasks_completed_after_time_limit"
             print('仿真正常结束')
-            final_penalty = -self.total_task_wait_time
-            return 0, final_obs, final_penalty, True, False, final_info
+            return 0, final_obs, 0.0, True, False, final_info
         else:
             final_info["termination_reason"] = "no_future_generation_event"
-            final_penalty = -self.total_task_wait_time
-            return 0, final_obs, final_penalty, True, False, final_info
+            # print(f"仿真异常结束，原因：{final_info['termination_reason']}")
+            return 0, final_obs, -1000, True, False, final_info
 
     def plot_crane_trajectories(self, save_path="crane_trajectory.png"):
         """

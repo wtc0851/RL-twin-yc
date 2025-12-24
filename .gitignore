@@ -1,2 +1,5 @@
 .venv/
-ppo_yard_tensorboard/
+
+*.png
+
+.idea/

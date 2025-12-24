@@ -7,3 +7,4 @@ tensorboard
 tqdm
 rich
 sb3-contrib
+openpyxl
